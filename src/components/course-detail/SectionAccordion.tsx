@@ -17,6 +17,14 @@ interface SectionAccordionProps {
   onSelectLesson: (lesson: Lesson) => void;
   onToggleComplete: (lessonId: number) => void;
   onToggleFavorite: (lessonId: number) => void;
+  /**
+   * Set when the section is a topic inside a module ("1.2"). The row then shows
+   * the number before the ring, wraps its title, and turns into a card while
+   * open so its lessons read as belonging to it.
+   */
+  number?: string;
+  /** Title to show instead of `section.title` (the topic without its module name). */
+  title?: string;
 }
 
 export function SectionAccordion({
@@ -25,7 +33,11 @@ export function SectionAccordion({
   onSelectLesson,
   onToggleComplete,
   onToggleFavorite,
+  number,
+  title,
 }: SectionAccordionProps) {
+  const isTopic = number !== undefined;
+  const displayTitle = title ?? section.title;
   // Rows rendered after first paint are lessons completed during this visit
   const settled = useRef(false);
   useEffect(() => {
@@ -46,22 +58,55 @@ export function SectionAccordion({
   );
 
   const sectionPct = section.lessons.length ? (completedCount / section.lessons.length) * 100 : 0;
+  const status = allComplete ? (
+    <CheckCircle className="size-4 shrink-0 text-primary" weight="fill" aria-label="Section complete" />
+  ) : (
+    <ProgressRing value={sectionPct} size={16} stroke={2.25} />
+  );
 
   return (
-    <div className="py-0.5">
+    <div
+      className={cn(
+        isTopic ? "rounded-xl transition-colors duration-300" : "py-0.5",
+        isTopic && open && "bg-card",
+      )}
+    >
       <button
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-secondary/70"
+        className={cn(
+          "flex w-full gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-secondary/70",
+          isTopic ? "items-start" : "items-center",
+        )}
       >
-        {allComplete ? (
-          <CheckCircle className="size-4 shrink-0 text-primary" weight="fill" aria-label="Section complete" />
+        {isTopic ? (
+          <>
+            <span
+              className={cn(
+                "flex h-[19px] w-[30px] shrink-0 items-center justify-center font-mono text-xs font-medium tabular-nums transition-colors",
+                allComplete ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              {number}
+            </span>
+            {/* Sits in the same column as the lesson status icons below it */}
+            <span className="flex h-[19px] shrink-0 items-center">{status}</span>
+          </>
         ) : (
-          <ProgressRing value={sectionPct} size={16} stroke={2.25} />
+          status
         )}
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-sans text-[13px] font-semibold text-foreground">{section.title}</span>
+        <div className={cn("flex min-w-0 flex-1 flex-col", isTopic && "ml-0.5 gap-0.5")}>
+          {isTopic ? (
+            <span
+              title={displayTitle}
+              className="line-clamp-2 font-sans text-[13.5px] leading-snug font-medium text-foreground"
+            >
+              {displayTitle}
+            </span>
+          ) : (
+            <span className="truncate font-sans text-[13px] font-semibold text-foreground">{displayTitle}</span>
+          )}
           <span className="font-sans text-xs text-muted-foreground tabular-nums">
             {completedCount} of {section.lessons.length}
             {sectionDuration > 0 && <> · {formatDuration(sectionDuration)}</>}
@@ -69,7 +114,7 @@ export function SectionAccordion({
         </div>
 
         <CaretDown
-          className="size-3.5 shrink-0 text-muted-foreground"
+          className={cn("size-3.5 shrink-0 text-muted-foreground", isTopic && "mt-0.5")}
           style={{
             transform: open ? "rotate(0deg)" : "rotate(-90deg)",
             transition: `transform 300ms ${EASE}`,
@@ -87,7 +132,7 @@ export function SectionAccordion({
         }}
       >
         <div className="overflow-hidden">
-          <div className="flex flex-col gap-px pt-0.5 pb-2">
+          <div className={cn("flex flex-col gap-px", isTopic ? "px-1.5 pb-1.5" : "pt-0.5 pb-2")}>
             {section.lessons.map((lesson, index) => {
               const isActive = lesson.id === activeLessonId;
 
@@ -95,8 +140,16 @@ export function SectionAccordion({
                 <div
                   key={lesson.id}
                   className={cn(
-                    "group flex items-center gap-1 rounded-xl pr-2.5 pl-1.5 transition-colors",
-                    isActive ? "bg-secondary" : "hover:bg-secondary/60",
+                    "group flex items-center gap-1 rounded-xl pr-2.5 transition-colors",
+                    // In a topic card, the status icon lines up with the topic title
+                    isTopic ? "pl-[42px]" : "pl-1.5",
+                    isActive
+                      ? isTopic
+                        ? "bg-accent"
+                        : "bg-secondary"
+                      : isTopic
+                        ? "hover:bg-secondary"
+                        : "hover:bg-secondary/60",
                   )}
                   style={{
                     opacity: open ? 1 : 0,

@@ -79,6 +79,16 @@ const MEDIA_ERROR_NAMES = [
   "MEDIA_ERR_SRC_NOT_SUPPORTED",
 ];
 
+// MediaError codes that mean "the webview can't read this file", as opposed to
+// an aborted or network failure. Literals, since `MediaError` isn't in jsdom.
+const MEDIA_ERR_DECODE = 3;
+const MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
+
+// Local files the webview rejected even though their extension looked playable
+// (most often MPEG-TS saved as `.mp4`). Remembered for the session so going back
+// to one of these lessons prepares it straight away instead of failing first.
+const unplayableLocalPaths = new Set<string>();
+
 interface SafePlayContext {
   lessonId?: number;
   videoPath?: string;
@@ -341,7 +351,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   // seeking works the same way everywhere.
   const [prepared, setPrepared] = useState<{ path: string; src: string } | null>(null);
   const [prepareAttempt, setPrepareAttempt] = useState(0);
-  const needsPreparation = !!lesson && !isRemoteSource && getFileExtension(lesson.videoPath) === "ts";
+  // Set when the webview rejects a local file; re-renders into preparation.
+  const [fallbackPath, setFallbackPath] = useState<string | null>(null);
+  const needsPreparation =
+    !!lesson &&
+    !isRemoteSource &&
+    (getFileExtension(lesson.videoPath) === "ts" ||
+      fallbackPath === lesson.videoPath ||
+      unplayableLocalPaths.has(lesson.videoPath));
   const videoSrc = lesson
     ? needsPreparation
       ? prepared?.path === lesson.videoPath ? prepared.src : undefined
@@ -1114,6 +1131,19 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
             networkState: v.networkState,
             readyState: v.readyState,
           });
+          // A local file the webview can't open is often still fine for ffmpeg —
+          // typically MPEG-TS named `.mp4`. Prepare a compatible copy instead of
+          // failing; if preparation fails too, its own error is shown.
+          if (
+            lesson &&
+            !isRemoteSource &&
+            !needsPreparation &&
+            (err?.code === MEDIA_ERR_SRC_NOT_SUPPORTED || err?.code === MEDIA_ERR_DECODE)
+          ) {
+            unplayableLocalPaths.add(lesson.videoPath);
+            setFallbackPath(lesson.videoPath);
+            return;
+          }
           void surfaceLoadError();
         }}
       />

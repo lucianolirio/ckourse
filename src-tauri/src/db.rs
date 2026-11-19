@@ -9,6 +9,8 @@ use crate::parser::ParsedCourse;
 
 pub struct DbState {
     pub conn: Mutex<Connection>,
+    /// Folder holding `ckourse.db` (see `data_location`). Lock after `conn`.
+    pub data_dir: Mutex<std::path::PathBuf>,
 }
 
 // --- API types (sent to/from frontend) ---

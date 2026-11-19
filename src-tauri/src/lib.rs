@@ -1,4 +1,5 @@
 mod commands;
+mod data_location;
 mod db;
 mod drive_protocol;
 mod google;
@@ -24,12 +25,9 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("failed to resolve app data dir");
+            let data_dir = data_location::resolve(app.handle()).expect("failed to resolve app data dir");
 
-            let conn = db::init_db(&app_data_dir).expect("failed to initialize database");
+            let conn = db::init_db(&data_dir).expect("failed to initialize database");
 
             // Warm the Google credentials cache from SQLite so auth works without
             // touching the keychain.
@@ -49,6 +47,7 @@ pub fn run() {
 
             app.manage(DbState {
                 conn: std::sync::Mutex::new(conn),
+                data_dir: std::sync::Mutex::new(data_dir),
             });
 
             remote::init(app.handle().clone(), servers);
@@ -89,6 +88,8 @@ pub fn run() {
             commands::get_all_settings,
             commands::set_setting,
             commands::get_library_stats,
+            commands::inspect_data_dir,
+            commands::change_data_dir,
             commands::get_custom_categories,
             commands::add_custom_category,
             commands::delete_custom_category,

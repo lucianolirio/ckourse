@@ -2,6 +2,13 @@
 
 Local `.ts` / `.TS` files, including courses on the Desktop, use the existing
 player and all existing controls. No reimport is needed for existing lessons.
+
+The same preparation also runs for any local file the webview refuses to open
+(`MEDIA_ERR_SRC_NOT_SUPPORTED` / `MEDIA_ERR_DECODE`) — most often MPEG-TS saved
+with an `.mp4` extension, as some course downloaders do. The player tries the
+file directly first, then falls back; the path is remembered for the session so
+later visits prepare straight away. AAC audio is copied rather than re-encoded,
+so a typical H.264/AAC lesson is ready in about a second.
 The original video paths and lesson IDs remain in SQLite. Notes with timestamps,
 bookmarks, favorites, completion, last-watched lesson and saved position are not
 migrated or rewritten by media preparation.

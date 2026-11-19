@@ -184,6 +184,21 @@ export async function getLibraryStats(): Promise<LibraryStats> {
   return invoke<LibraryStats>("get_library_stats");
 }
 
+export interface DataDirInfo {
+  /** The folder already holds a ckourse.db */
+  hasDatabase: boolean;
+  isCurrent: boolean;
+}
+
+export async function inspectDataDir(dir: string): Promise<DataDirInfo> {
+  return invoke<DataDirInfo>("inspect_data_dir", { dir });
+}
+
+/** Copies the database to `dir` (or adopts the one there) and switches to it. Returns the new database path. */
+export async function changeDataDir(dir: string, useExisting: boolean): Promise<string> {
+  return invoke<string>("change_data_dir", { dir, useExisting });
+}
+
 export async function deleteAllData(): Promise<void> {
   return invoke("delete_all_data");
 }

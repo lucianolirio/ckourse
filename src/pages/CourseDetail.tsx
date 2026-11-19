@@ -21,7 +21,7 @@ import { ProgressRing } from "@/components/ui/progress-ring";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import type { VideoPlayerHandle } from "@/types";
 import { VideoPlayer } from "@/components/course-detail/VideoPlayer";
-import { SectionAccordion } from "@/components/course-detail/SectionAccordion";
+import { CurriculumList } from "@/components/course-detail/CurriculumList";
 import { NotesPanel } from "@/components/course-detail/NotesPanel";
 import { CourseEditPanel } from "@/components/course-detail/CourseEditPanel";
 import { CourseCelebration } from "@/components/course-detail/CourseCelebration";
@@ -29,6 +29,7 @@ import { PdfViewer } from "@/components/course-detail/PdfViewer";
 import { ResourceList } from "@/components/course-detail/ResourceList";
 import { EASE_OUT, SPRING_SMOOTH } from "@/lib/constants";
 import { formatDuration } from "@/lib/format";
+import { formatSectionPath } from "@/lib/curriculum";
 import type { Note, Course, CourseDetail as CourseDetailData, Lesson, Resource, Subtitle } from "@/types";
 import { useSettings } from "@/hooks/useSettings";
 import { routeTitles } from "@/components/app-shell/constants";
@@ -738,7 +739,7 @@ function CourseDetailInner({
             <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
               <div className="min-w-0">
                 <p className="truncate font-sans text-[13px] text-muted-foreground tabular-nums">
-                  {activeSection && <>{activeSection.title} · </>}
+                  {activeSection && <>{formatSectionPath(activeSection.title)} · </>}
                   Lesson {activeIndex + 1} of {allLessons.length}
                   {activeLesson.duration > 0 && <> · {formatDuration(activeLesson.duration)}</>}
                 </p>
@@ -876,16 +877,13 @@ function CourseDetailInner({
               </div>
             </div>
             <div className="flex-1 overflow-y-auto px-2 pb-6">
-              {courseData.sections.map((section) => (
-                <SectionAccordion
-                  key={section.id}
-                  section={section}
-                  activeLessonId={activeLesson?.id}
-                  onSelectLesson={handleSelectLesson}
-                  onToggleComplete={handleToggleComplete}
-                  onToggleFavorite={handleToggleFavorite}
-                />
-              ))}
+              <CurriculumList
+                sections={courseData.sections}
+                activeLessonId={activeLesson?.id}
+                onSelectLesson={handleSelectLesson}
+                onToggleComplete={handleToggleComplete}
+                onToggleFavorite={handleToggleFavorite}
+              />
             </div>
           </div>
         </div>

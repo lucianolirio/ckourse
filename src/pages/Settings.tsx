@@ -13,7 +13,10 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { LibraryStats } from "@/types";
-import { getLibraryStats, deleteAllData } from "@/lib/store";
+import { getLibraryStats, deleteAllData, inspectDataDir, changeDataDir } from "@/lib/store";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { toast } from "sonner";
 import {
   driveCredentialsStatus,
   driveSetCredentials,
@@ -138,6 +141,69 @@ function DeleteConfirmDialog({
           </Button>
           <Button variant="destructive" onClick={onConfirm} disabled={!matches}>
             Erase everything
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Asked when the chosen folder already has a ckourse.db: keep that one, or replace it with the current data. */
+function ExistingDataDialog({
+  dir,
+  busy,
+  onChoose,
+  onCancel,
+}: {
+  dir: string;
+  busy: boolean;
+  onChoose: (useExisting: boolean) => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel, busy]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="existing-data-title"
+      aria-describedby="existing-data-desc"
+    >
+      <div className="absolute inset-0 bg-background/80 backdrop-blur-sm" onClick={busy ? undefined : onCancel} />
+      <div
+        className="relative w-full max-w-md rounded-2xl bg-popover p-6 shadow-pop"
+        style={{ animation: `card-in 250ms ${EASE_OUT} both` }}
+      >
+        <div className="mb-4 flex size-11 items-center justify-center rounded-full bg-secondary">
+          <Database className="size-6 text-foreground" />
+        </div>
+        <h3 id="existing-data-title" className="font-heading text-lg font-semibold text-foreground">
+          This folder already has Ckourse data
+        </h3>
+        <div id="existing-data-desc" className="mt-2 mb-5 flex flex-col gap-2 font-sans text-sm text-muted-foreground">
+          <p className="break-all text-foreground">{dir}</p>
+          <p>
+            Use the data that's there, or replace it with what you have now. Replacing keeps the old
+            file next to it as a backup.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="outline" onClick={() => onChoose(false)} disabled={busy}>
+            Replace with current data
+          </Button>
+          <Button onClick={() => onChoose(true)} disabled={busy}>
+            Use the data there
           </Button>
         </div>
       </div>
@@ -486,6 +552,40 @@ export function Settings({ className }: SettingsProps) {
 
   usePageVisible("/settings", loadStats);
 
+  // Data folder: pick a folder, copy (or adopt) the database there, then restart on it
+  const [movingData, setMovingData] = useState(false);
+  const [existingDataDir, setExistingDataDir] = useState<string | null>(null);
+
+  const moveData = useCallback(async (dir: string, useExisting: boolean) => {
+    setMovingData(true);
+    try {
+      await changeDataDir(dir, useExisting);
+      toast.success("Data folder changed", { description: "Restarting Ckourse…" });
+      await relaunch();
+    } catch (e) {
+      setMovingData(false);
+      setExistingDataDir(null);
+      toast.error("Couldn't change the data folder", { description: String(e) });
+    }
+  }, []);
+
+  const handleChangeDataDir = useCallback(async () => {
+    const dir = await openDialog({ directory: true, title: "Choose where Ckourse keeps its data" });
+    if (typeof dir !== "string") return;
+    try {
+      const info = await inspectDataDir(dir);
+      if (info.isCurrent) {
+        toast("Ckourse already keeps its data in this folder");
+      } else if (info.hasDatabase) {
+        setExistingDataDir(dir);
+      } else {
+        await moveData(dir, false);
+      }
+    } catch (e) {
+      toast.error("Couldn't use this folder", { description: String(e) });
+    }
+  }, [moveData]);
+
   const handleDeleteAll = useCallback(async () => {
     await deleteAllData();
     setShowDeleteDialog(false);
@@ -593,15 +693,20 @@ export function Settings({ className }: SettingsProps) {
               </span>
             }
           >
-            {stats?.dbPath && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void revealItemInDir(stats.dbPath).catch(() => {})}
-              >
-                Show in Finder
+            <div className="flex shrink-0 gap-1">
+              {stats?.dbPath && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void revealItemInDir(stats.dbPath).catch(() => {})}
+                >
+                  Show in Finder
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => void handleChangeDataDir()} disabled={movingData}>
+                {movingData ? "Moving…" : "Change location…"}
               </Button>
-            )}
+            </div>
           </SettingRow>
         </SettingsGroup>
 
@@ -625,6 +730,15 @@ export function Settings({ className }: SettingsProps) {
           </SettingRow>
         </SettingsGroup>
       </div>
+
+      {existingDataDir && (
+        <ExistingDataDialog
+          dir={existingDataDir}
+          busy={movingData}
+          onChoose={(useExisting) => void moveData(existingDataDir, useExisting)}
+          onCancel={() => setExistingDataDir(null)}
+        />
+      )}
 
       {showDeleteDialog && (
         <DeleteConfirmDialog

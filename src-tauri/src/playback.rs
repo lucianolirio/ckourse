@@ -1,5 +1,7 @@
-//! Local transport streams are prepared outside the course folder. Lesson paths
-//! and database IDs always refer to the original; the MP4 is disposable cache.
+//! Local videos the webview can't open directly — `.ts` files, and anything else
+//! it rejects, such as MPEG-TS saved with an `.mp4` extension — are prepared
+//! outside the course folder. Lesson paths and database IDs always refer to the
+//! original; the MP4 is disposable cache.
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::Read;
@@ -90,12 +92,10 @@ fn prepare_with_tools(
     let source = source
         .canonicalize()
         .map_err(|e| format!("Cannot open source video: {e}"))?;
-    if !source.is_file()
-        || !source
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("ts"))
-    {
-        return Err("Expected a local .ts video".into());
+    // Any extension: the frontend also falls back here when the webview rejects a
+    // file whose name hides its real container (e.g. MPEG-TS named `.mp4`).
+    if !source.is_file() {
+        return Err("Expected a local video file".into());
     }
     fs::create_dir_all(cache).map_err(|e| format!("Cannot create playback cache: {e}"))?;
     remove_stale_temporaries(cache);
@@ -108,14 +108,12 @@ fn prepare_with_tools(
     }
 
     let temporary = cache.join(format!("{key}-{}{TEMP_SUFFIX}", uuid::Uuid::new_v4()));
-    let probe = Command::new(ffprobe)
+    let probe = tool(ffprobe)
         .args([
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=codec_name,pix_fmt",
+            "stream=codec_type,codec_name,pix_fmt",
             "-of",
             "json",
         ])
@@ -123,18 +121,36 @@ fn prepare_with_tools(
         .output()
         .map_err(|e| format!("Cannot inspect video: {e}"))?;
     if !probe.status.success() {
-        return Err("Cannot inspect this transport stream".into());
+        return Err("Cannot inspect this video".into());
     }
     let info: serde_json::Value =
         serde_json::from_slice(&probe.stdout).map_err(|e| e.to_string())?;
-    let stream = &info["streams"][0];
-    let copy_video = stream["codec_name"] == "h264" && stream["pix_fmt"] == "yuv420p";
+    let first_of = |kind: &str| {
+        info["streams"]
+            .as_array()
+            .and_then(|streams| streams.iter().find(|s| s["codec_type"] == kind))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (video, audio) = (first_of("video"), first_of("audio"));
+    let copy_video = video["codec_name"] == "h264" && video["pix_fmt"] == "yuv420p";
+    // AAC is already what the MP4 needs. Copying it makes preparing a long
+    // lesson take about a second instead of re-encoding all of its audio.
+    let copy_audio = audio["codec_name"] == "aac";
+
+    // Cheapest first, then progressively re-encode whatever a failed copy broke.
+    let mut attempts = vec![(!copy_video, !copy_audio)];
+    if copy_audio {
+        attempts.push((!copy_video, true));
+    }
+    if copy_video {
+        attempts.push((true, true));
+    }
 
     let result = (|| {
         let mut last_error = String::new();
-        let attempts: &[bool] = if copy_video { &[false, true] } else { &[true] };
-        for &transcode in attempts {
-            let mut command = Command::new(ffmpeg);
+        for &(transcode, transcode_audio) in &attempts {
+            let mut command = tool(ffmpeg);
             command
                 .args([
                     "-nostdin",
@@ -174,12 +190,13 @@ fn prepare_with_tools(
                 command.args(["-c:v", "copy"]);
             }
             // AAC covers TS audio codecs unsupported by WebKit (MP2, AC3, ...).
+            if transcode_audio {
+                command.args(["-c:a", "aac", "-b:a", "192k"]);
+            } else {
+                command.args(["-c:a", "copy"]);
+            }
             command
                 .args([
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "192k",
                     "-avoid_negative_ts",
                     "make_zero",
                     "-movflags",
@@ -221,6 +238,19 @@ fn prepare_with_tools(
 /// Run ffmpeg, killing it if the request is abandoned. The outer `Result` is a
 /// hard failure (spawn error, cancellation); the inner one carries ffmpeg's
 /// stderr when it exits unsuccessfully so the next attempt can run.
+/// A command for a bundled tool. On Windows a GUI app spawning a console program
+/// gets a console window flashing up for each run unless told not to.
+fn tool(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn run_cancellable(
     command: &mut Command,
     cancelled: &dyn Fn() -> bool,
@@ -409,6 +439,68 @@ mod tests {
         let err = prepare_with_tools(&source, &dir.join("cache"), &missing, &missing, &|| true)
             .unwrap_err();
         assert_eq!(err, CANCELLED_MESSAGE);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn any_extension_reaches_the_tools() {
+        // MPEG-TS named `.mp4` must not be turned away by its extension; with no
+        // tools present it should get as far as trying to inspect the file.
+        let dir = temp_dir();
+        let source = dir.join("1. Aula.mp4");
+        fs::write(&source, b"not used").unwrap();
+        let missing = dir.join("no-such-tool");
+        let err = prepare_with_tools(&source, &dir.join("cache"), &missing, &missing, &|| false)
+            .unwrap_err();
+        assert!(err.starts_with("Cannot inspect video"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Uses the binaries copied by scripts/download-ffmpeg.sh (or publish-windows.ps1).
+    #[test]
+    #[ignore = "requires the bundled ffmpeg/ffprobe in src-tauri/binaries"]
+    fn transport_stream_named_mp4_is_remuxed() {
+        let bundled = |name: &str| {
+            let triple = if cfg!(windows) {
+                "x86_64-pc-windows-msvc.exe"
+            } else if cfg!(target_arch = "aarch64") {
+                "aarch64-apple-darwin"
+            } else {
+                "x86_64-apple-darwin"
+            };
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join(format!("{name}-{triple}"))
+        };
+        let (ffmpeg, ffprobe) = (bundled("ffmpeg"), bundled("ffprobe"));
+        let dir = temp_dir();
+        let source = dir.join("Introdução #1 [TS].mp4");
+        assert!(Command::new(&ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .args(["-f", "mpegts"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let original = fs::read(&source).unwrap();
+
+        let cached =
+            prepare_with_tools(&source, &dir.join("cache"), &ffmpeg, &ffprobe, &|| false).unwrap();
+
+        assert_eq!(original, fs::read(&source).unwrap(), "source must be untouched");
+        let probe = Command::new(&ffprobe)
+            .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
+            .arg(&cached)
+            .output()
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        assert!(info["format"]["format_name"].as_str().unwrap().contains("mp4"));
+        assert_eq!(info["streams"][0]["codec_name"], "h264");
+        assert_eq!(info["streams"][1]["codec_name"], "aac");
+        let duration: f64 = info["format"]["duration"].as_str().unwrap().parse().unwrap();
+        assert!((duration - 4.0).abs() < 0.25, "timeline drift: {duration}");
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -71,6 +71,45 @@ describe("local TS preparation", () => {
     await act(async () => second.resolve("/cache/second.mp4"));
     expect(view.container.querySelector("video")!.src).toContain("second.mp4");
   });
+  it("prepares a local file the webview rejects, such as MPEG-TS named .mp4", async () => {
+    const pending = deferred(); invoke.mockReturnValue(pending.promise);
+    const disguised = { ...lesson(1), videoPath: "C:\\Cursos\\Introdução #1\\1. Aula [TS].mp4" };
+    const view = render(<MemoryRouter><VideoPlayer lesson={disguised} subtitles={[]} hasNext={false} initialTime={2.25} /></MemoryRouter>);
+    const video = view.container.querySelector("video")!;
+    expect(invoke).not.toHaveBeenCalled();
+    expect(video.src).toContain("stream://");
+    Object.defineProperty(video, "error", { configurable: true, value: { code: 4, message: "DEMUXER_ERROR_COULD_NOT_OPEN" } });
+    fireEvent.error(video);
+    expect(invoke).toHaveBeenCalledWith("prepare_local_video", { path: disguised.videoPath, requestId: expect.any(String) });
+    expect(view.queryByText(/Couldn't load this video/)).toBeNull();
+    await act(async () => pending.resolve("C:\\cache\\remuxed.mp4"));
+    expect(video.src).toContain("remuxed.mp4");
+    Object.defineProperty(video, "duration", { configurable: true, value: 4 });
+    fireEvent.loadedMetadata(video);
+    expect(video.currentTime).toBe(2.25);
+  });
+  it("goes straight to preparation when revisiting a rejected local file", async () => {
+    invoke.mockReturnValue(new Promise(() => {}));
+    const disguised = { ...lesson(1), videoPath: "D:\\Cursos\\revisit.mp4" };
+    const player = <MemoryRouter><VideoPlayer lesson={disguised} subtitles={[]} hasNext={false} /></MemoryRouter>;
+    const first = render(player);
+    const video = first.container.querySelector("video")!;
+    Object.defineProperty(video, "error", { configurable: true, value: { code: 4 } });
+    fireEvent.error(video);
+    first.unmount();
+    invoke.mockClear();
+    const second = render(player);
+    expect(second.container.querySelector("video")!.getAttribute("src")).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("prepare_local_video", { path: disguised.videoPath, requestId: expect.any(String) });
+  });
+  it("does not prepare remote lessons that fail to load", () => {
+    const remote = { ...lesson(1), videoPath: "srv:abc:/Cursos/aula.mp4" };
+    const view = render(<MemoryRouter><VideoPlayer lesson={remote} subtitles={[]} hasNext={false} /></MemoryRouter>);
+    const video = view.container.querySelector("video")!;
+    Object.defineProperty(video, "error", { configurable: true, value: { code: 4 } });
+    fireEvent.error(video);
+    expect(invoke).not.toHaveBeenCalledWith("prepare_local_video", expect.anything());
+  });
   it("allows preparation to be retried after an error", async () => {
     invoke.mockRejectedValueOnce("Not enough free disk space").mockResolvedValueOnce("/cache/retried.mp4");
     const view = render(<MemoryRouter><VideoPlayer lesson={lesson(1)} subtitles={[]} hasNext={false} /></MemoryRouter>);
