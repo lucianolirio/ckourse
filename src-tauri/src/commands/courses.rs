@@ -54,6 +54,18 @@ pub fn update_course(
         .map_err(|e| e.to_string())
 }
 
+/// Points a local course at the folder it was moved to, keeping its progress and notes.
+/// Async because it checks every video on disk, which can be slow on an external drive.
+#[tauri::command]
+pub async fn relocate_course(
+    state: tauri::State<'_, DbState>,
+    course_id: i64,
+    folder: String,
+) -> Result<db::RelocatedCourse, String> {
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    db::relocate_course(&conn, course_id, Path::new(&folder))
+}
+
 #[tauri::command]
 pub fn reset_course_progress(state: tauri::State<'_, DbState>, course_id: i64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|e| e.to_string())?;

@@ -8,12 +8,14 @@ import {
   WarningIcon as Warning,
   FolderOpenIcon as FolderOpen,
 } from "@phosphor-icons/react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EASE_OUT, SNAPPY } from "@/lib/constants";
 import type { CourseCategory, Course } from "@/types";
-import { getCustomCategories, addCustomCategory, deleteCustomCategory } from "@/lib/store";
+import { getCustomCategories, addCustomCategory, deleteCustomCategory, type RelocatedCourse } from "@/lib/store";
 import { CourseColorPicker } from "@/components/ui/course-color-picker";
 import { CourseCover } from "@/components/dashboard/CourseCover";
 
@@ -31,6 +33,8 @@ interface CourseEditPanelProps {
   onSave: (title: string, author: string, accentColor: string, category: string) => Promise<void>;
   onResetProgress: () => Promise<void>;
   onDelete: () => Promise<void>;
+  /** Points the course at the folder it was moved to (local courses only). */
+  onRelocate: (folder: string) => Promise<RelocatedCourse>;
   onBack: () => void;
   className?: string;
 }
@@ -40,6 +44,7 @@ export function CourseEditPanel({
   onSave,
   onResetProgress,
   onDelete,
+  onRelocate,
   onBack,
   className,
 }: CourseEditPanelProps) {
@@ -88,6 +93,29 @@ export function CourseEditPanel({
     await onDelete();
   };
 
+  const isLocal = !course.folderPath.startsWith("gdrive:") && !course.folderPath.startsWith("srv:");
+  const [relocating, setRelocating] = useState(false);
+
+  const handleRelocate = async () => {
+    const folder = await openDialog({ directory: true, title: "Choose the folder this course was moved to" });
+    if (typeof folder !== "string") return;
+    setRelocating(true);
+    try {
+      const { missingVideos, totalVideos } = await onRelocate(folder);
+      if (missingVideos > 0) {
+        toast.warning("Folder updated", {
+          description: `${missingVideos} of ${totalVideos} videos aren't in the new folder.`,
+        });
+      } else {
+        toast.success("Folder updated", { description: "Progress and notes are kept." });
+      }
+    } catch (e) {
+      toast.error("Couldn't change the folder", { description: String(e) });
+    } finally {
+      setRelocating(false);
+    }
+  };
+
   return (
     <div className={cn("mx-auto w-full max-w-[1100px] px-6 pt-10 pb-20 lg:px-10", className)}>
       <div
@@ -133,9 +161,21 @@ export function CourseEditPanel({
       >
         <div className="flex items-center gap-3 rounded-2xl border border-border bg-card shadow-card px-4 py-3">
           <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate font-mono text-xs text-muted-foreground select-text" title={course.folderPath}>
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground select-text" title={course.folderPath}>
             {course.folderPath}
           </span>
+          {isLocal && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => void handleRelocate()}
+              disabled={relocating}
+              title="Moved this course? Pick its new folder. Progress and notes are kept."
+            >
+              {relocating ? "Updating…" : "Change folder…"}
+            </Button>
+          )}
         </div>
       </div>
 

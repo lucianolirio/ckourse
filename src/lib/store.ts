@@ -64,6 +64,18 @@ export async function updateCourse(
   return invoke("update_course", { courseId, title, author, accentColor, category });
 }
 
+export interface RelocatedCourse {
+  folderPath: string;
+  totalVideos: number;
+  /** Videos not found under the new folder */
+  missingVideos: number;
+}
+
+/** Points a local course at the folder it was moved to; progress and notes are kept. */
+export async function relocateCourse(courseId: number, folder: string): Promise<RelocatedCourse> {
+  return invoke<RelocatedCourse>("relocate_course", { courseId, folder });
+}
+
 export async function resetCourseProgress(courseId: number): Promise<void> {
   return invoke("reset_course_progress", { courseId });
 }

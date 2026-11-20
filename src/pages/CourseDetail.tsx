@@ -43,6 +43,7 @@ import {
   saveLessonPosition,
   updateLessonDuration,
   updateCourse,
+  relocateCourse,
   resetCourseProgress,
   deleteCourse,
   toggleBookmark,
@@ -172,6 +173,11 @@ export function CourseDetail({ className }: CourseDetailProps) {
         onDelete={async () => {
           await deleteCourse(course.id);
           navigate(fromParam);
+        }}
+        onRelocate={async (folder) => {
+          const result = await relocateCourse(course.id, folder);
+          await reload();
+          return result;
         }}
         onBack={() => setEditing(false)}
         className={className}

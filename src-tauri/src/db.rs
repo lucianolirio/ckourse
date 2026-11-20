@@ -686,6 +686,149 @@ pub fn update_course(
     Ok(())
 }
 
+// --- Moving a local course ---
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RelocatedCourse {
+    pub folder_path: String,
+    pub total_videos: i64,
+    /// Videos not found under the new folder (renamed or removed since the import)
+    pub missing_videos: i64,
+}
+
+/// `path` re-rooted from `from` to `to`, or `None` when it isn't under `from`.
+fn rebase(path: &str, from: &Path, to: &Path) -> Option<String> {
+    let rest = Path::new(path).strip_prefix(from).ok()?;
+    let moved = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+    Some(moved.to_string_lossy().into_owned())
+}
+
+/// Rewrites every `(id, path)` row the query returns for the course, using `update`
+/// (`?1` = new path, `?2` = id). Paths outside `from` are left alone.
+fn rebase_rows(conn: &Connection, select: &str, update: &str, course_id: i64, from: &Path, to: &Path) -> SqlResult<()> {
+    let rows: Vec<(i64, String)> = conn
+        .prepare(select)?
+        .query_map(params![course_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<SqlResult<_>>()?;
+    for (id, path) in rows {
+        if let Some(moved) = rebase(&path, from, to) {
+            conn.execute(update, params![moved, id])?;
+        }
+    }
+    Ok(())
+}
+
+/// Points a local course at the folder it was moved to. Every stored path under the
+/// old folder (videos, subtitles, attachments, cover) is rewritten to the same place
+/// under the new one. Lesson ids don't change, so progress, notes and favorites stay
+/// with their lessons.
+///
+/// Refuses a folder that holds none of the course's videos. Picking the folder that
+/// contains the moved one also works: its subfolder with the old name is used.
+pub fn relocate_course(conn: &Connection, course_id: i64, picked: &Path) -> Result<RelocatedCourse, String> {
+    let (old, source_type): (String, String) = conn
+        .query_row(
+            "SELECT folder_path, source_type FROM courses WHERE id = ?1",
+            params![course_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    if source_type != "local" {
+        return Err("Only courses imported from a folder on your computer can be moved.".into());
+    }
+    let old = std::path::PathBuf::from(old);
+
+    let videos: Vec<String> = conn
+        .prepare("SELECT l.video_path FROM lessons l JOIN sections s ON l.section_id = s.id WHERE s.course_id = ?1")
+        .map_err(|e| e.to_string())?
+        .query_map(params![course_id], |r| r.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<SqlResult<_>>()
+        .map_err(|e| e.to_string())?;
+    let found_in = |root: &Path| {
+        videos
+            .iter()
+            .filter(|p| rebase(p, &old, root).is_some_and(|moved| Path::new(&moved).is_file()))
+            .count()
+    };
+
+    let mut target = picked.to_path_buf();
+    let mut found = found_in(&target);
+    if found == 0 {
+        if let Some(name) = old.file_name() {
+            let nested = picked.join(name);
+            let n = if nested.is_dir() { found_in(&nested) } else { 0 };
+            if n > 0 {
+                target = nested;
+                found = n;
+            }
+        }
+    }
+    if target == old {
+        return Err("This course already uses that folder.".into());
+    }
+    if found == 0 {
+        return Err("None of this course's videos are in that folder. Pick the folder you moved the course to.".into());
+    }
+
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    match relocate_course_inner(conn, course_id, &old, &target) {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| e.to_string())?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e.to_string());
+        }
+    }
+
+    Ok(RelocatedCourse {
+        folder_path: target.to_string_lossy().into_owned(),
+        total_videos: videos.len() as i64,
+        missing_videos: (videos.len() - found) as i64,
+    })
+}
+
+fn relocate_course_inner(conn: &Connection, course_id: i64, from: &Path, to: &Path) -> SqlResult<()> {
+    rebase_rows(
+        conn,
+        "SELECT l.id, l.video_path FROM lessons l JOIN sections s ON l.section_id = s.id WHERE s.course_id = ?1",
+        "UPDATE lessons SET video_path = ?1 WHERE id = ?2",
+        course_id,
+        from,
+        to,
+    )?;
+    rebase_rows(
+        conn,
+        "SELECT sub.id, sub.path FROM subtitles sub
+         JOIN lessons l ON sub.lesson_id = l.id JOIN sections s ON l.section_id = s.id
+         WHERE s.course_id = ?1",
+        "UPDATE subtitles SET path = ?1 WHERE id = ?2",
+        course_id,
+        from,
+        to,
+    )?;
+    rebase_rows(
+        conn,
+        "SELECT id, path FROM resources WHERE course_id = ?1",
+        "UPDATE resources SET path = ?1 WHERE id = ?2",
+        course_id,
+        from,
+        to,
+    )?;
+
+    let thumbnail: Option<String> = conn.query_row(
+        "SELECT thumbnail_path FROM courses WHERE id = ?1",
+        params![course_id],
+        |r| r.get(0),
+    )?;
+    let thumbnail = thumbnail.map(|t| rebase(&t, from, to).unwrap_or(t));
+    conn.execute(
+        "UPDATE courses SET folder_path = ?1, thumbnail_path = ?2, updated_at = ?3 WHERE id = ?4",
+        params![to.to_string_lossy().into_owned(), thumbnail, chrono_now(), course_id],
+    )?;
+    Ok(())
+}
+
 pub fn reset_course_progress(conn: &Connection, course_id: i64) -> SqlResult<()> {
     conn.execute(
         "UPDATE lessons SET completed = 0, is_last_watched = 0
@@ -1625,7 +1768,8 @@ pub fn count_courses_for_server(conn: &Connection, id: &str) -> SqlResult<i64> {
 mod tests {
     use super::*;
     use crate::parser::{
-        Confidence, ParsedCourse, ParsedLesson, ParsedResource, ParsedSection, ResourceType,
+        Confidence, ParsedCourse, ParsedLesson, ParsedResource, ParsedSection, ParsedSubtitle,
+        ResourceType,
     };
 
     fn temp_db() -> (Connection, std::path::PathBuf) {
@@ -1697,6 +1841,120 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0, "deleting a course removes its resources");
 
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn under(root: &Path, parts: &[&str]) -> String {
+        parts.iter().fold(root.to_path_buf(), |p, part| p.join(part)).to_string_lossy().into_owned()
+    }
+
+    fn lesson(title: &str, video_path: String) -> ParsedLesson {
+        ParsedLesson {
+            title: title.into(),
+            order: 0,
+            video_path,
+            duration_secs: 60,
+            subtitles: vec![],
+            resources: vec![],
+        }
+    }
+
+    fn course_in(folder: &str, lessons: Vec<ParsedLesson>) -> ParsedCourse {
+        ParsedCourse {
+            title: "Course".into(),
+            description: None,
+            thumbnail_path: None,
+            sections: vec![ParsedSection { title: "Intro".into(), order: 0, lessons }],
+            resources: vec![],
+            confidence: Confidence::High,
+            confidence_reasons: vec![],
+            total_video_count: 0,
+            folder_path: folder.into(),
+        }
+    }
+
+    fn save(conn: &Connection, parsed: &ParsedCourse) -> i64 {
+        let input = SaveCourseInput {
+            title: "Course".into(),
+            author: String::new(),
+            accent_color: "#000000".into(),
+            category: "other".into(),
+        };
+        save_parsed_course(conn, parsed, &input).unwrap()
+    }
+
+    #[test]
+    fn relocating_a_course_rewrites_its_paths_and_keeps_progress() {
+        let (conn, dir) = temp_db();
+        // The course was imported from old/React, then moved to new/React
+        let old = dir.join("old").join("React");
+        let parent = dir.join("new");
+        let new = parent.join("React");
+        std::fs::create_dir_all(new.join("01 Intro")).unwrap();
+        for parts in [&["01 Intro", "01.mp4"][..], &["01 Intro", "01.vtt"], &["01 Intro", "01.pdf"], &["handbook.pdf"], &["cover.jpg"]] {
+            std::fs::write(under(&new, parts), b"x").unwrap();
+        }
+
+        let mut first = lesson("Lesson", under(&old, &["01 Intro", "01.mp4"]));
+        first.subtitles.push(ParsedSubtitle {
+            path: under(&old, &["01 Intro", "01.vtt"]),
+            language: None,
+            is_positional_match: false,
+        });
+        first.resources.push(pdf("Slides", &under(&old, &["01 Intro", "01.pdf"])));
+        // Its file was removed after the import
+        let mut gone = lesson("Gone", under(&old, &["01 Intro", "02.mp4"]));
+        gone.order = 1;
+        let mut parsed = course_in(&old.to_string_lossy(), vec![first, gone]);
+        parsed.thumbnail_path = Some(under(&old, &["cover.jpg"]));
+        parsed.resources.push(pdf("Handbook", &under(&old, &["handbook.pdf"])));
+        let course_id = save(&conn, &parsed);
+
+        let lesson_id = get_course_detail(&conn, course_id).unwrap().unwrap().sections[0].lessons[0].id;
+        toggle_lesson_completed(&conn, lesson_id).unwrap();
+        toggle_favorite(&conn, lesson_id).unwrap();
+        add_note(&conn, course_id, lesson_id, "Lesson", "remember this").unwrap();
+
+        let wrong = relocate_course(&conn, course_id, &dir).unwrap_err();
+        assert!(wrong.contains("None of this course's videos"), "{wrong}");
+
+        // Picking the folder that holds the moved one finds it by name
+        let moved = relocate_course(&conn, course_id, &parent).unwrap();
+        assert_eq!(moved.folder_path, new.to_string_lossy());
+        assert_eq!((moved.total_videos, moved.missing_videos), (2, 1));
+
+        let detail = get_course_detail(&conn, course_id).unwrap().unwrap();
+        let first = &detail.sections[0].lessons[0];
+        assert_eq!(first.id, lesson_id, "lesson ids are kept");
+        assert!(first.completed && first.favorited);
+        assert_eq!(first.video_path, under(&new, &["01 Intro", "01.mp4"]));
+        assert_eq!(detail.sections[0].lessons[1].video_path, under(&new, &["01 Intro", "02.mp4"]));
+        let paths: Vec<&str> = detail.resources.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, [under(&new, &["handbook.pdf"]), under(&new, &["01 Intro", "01.pdf"])]);
+        let subtitle: String = conn
+            .query_row("SELECT path FROM subtitles WHERE lesson_id = ?1", params![lesson_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(subtitle, under(&new, &["01 Intro", "01.vtt"]));
+        let course = get_course_by_id(&conn, course_id).unwrap().unwrap();
+        assert_eq!(course.thumbnail_path, Some(under(&new, &["cover.jpg"])));
+        let notes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes WHERE lesson_id = ?1", params![lesson_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(notes, 1);
+
+        let again = relocate_course(&conn, course_id, &new).unwrap_err();
+        assert!(again.contains("already uses"), "{again}");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_local_courses_can_be_relocated() {
+        let (conn, dir) = temp_db();
+        let course_id = save(&conn, &course_in("gdrive:root", vec![lesson("Lesson", "gdrive:file".into())]));
+        assert!(relocate_course(&conn, course_id, &dir).is_err());
         drop(conn);
         let _ = std::fs::remove_dir_all(dir);
     }

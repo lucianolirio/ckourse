@@ -66,6 +66,7 @@ pub fn run() {
             commands::set_last_watched,
             commands::save_lesson_position,
             commands::update_course,
+            commands::relocate_course,
             commands::reset_course_progress,
             commands::delete_course,
             commands::get_all_notes,
